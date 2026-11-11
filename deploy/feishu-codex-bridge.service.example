@@ -1,0 +1,17 @@
+# User service example. Set the absolute Codex path in config.json, or add its
+# existing installation directory to PATH here. Pair interactively before use.
+[Unit]
+Description=Feishu Codex bridge
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/feishu-codex-bridge
+ExecStart=/opt/feishu-codex-bridge/feishu-bridge --config /opt/feishu-codex-bridge/config.json
+Restart=on-failure
+RestartSec=10
+UMask=0077
+TimeoutStopSec=45
+
+[Install]
+WantedBy=default.target

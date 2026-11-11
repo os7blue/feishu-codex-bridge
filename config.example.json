@@ -1,0 +1,15 @@
+{
+  "app_id": "",
+  "app_secret": "",
+  "project_dir": "/path/to/authorized-project",
+  "state_dir": "state",
+  "allowed_open_ids": [],
+  "codex_binary": "codex",
+  "codex_home": "",
+  "catalog_homes": [],
+  "model": "",
+  "approval_policy": "on-request",
+  "sandbox": "workspace-write",
+  "writable_roots": [],
+  "turn_timeout_seconds": 3600
+}

@@ -1,0 +1,23 @@
+.cache/
+config.json
+/state/
+/feishu-bridge
+*.log
+
+# Private deployment variants and local environment files
+/config.*.json
+!/config.example.json
+/.env
+/.env.*
+!/.env.example
+
+# Local collaboration and deployment records are not public source
+/AGENTS.md
+/SOURCE-MANIFEST.json
+/docs/HANDOFF.md
+/docs/PLAN.md
+/docs/REMAINING.md
+/docs/VALIDATION.md
+/docs/PRODUCT_REVIEW.md
+/docs/PRODUCT_CHANGES.md
+/docs/history/
