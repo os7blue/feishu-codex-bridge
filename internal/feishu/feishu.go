@@ -282,7 +282,7 @@ func (c *Client) SendCardRouted(ctx context.Context, chat string, card json.RawM
 	return []string{id}, nil
 }
 
-func (c *Client) sendContent(ctx context.Context, chat, kind, content, key string) (string, error) {
+func (c *Client) sendContent(ctx context.Context, chat, kind, content, key string, roots ...string) (string, error) {
 	hash := sha256.Sum256([]byte(key))
 	uuid := hex.EncodeToString(hash[:16])
 	req := larkim.NewCreateMessageReqBuilder().ReceiveIdType("chat_id").Body(
@@ -300,7 +300,21 @@ func (c *Client) sendContent(ctx context.Context, chat, kind, content, key strin
 			case <-timer.C:
 			}
 		}
-		resp, err := c.api.Im.Message.Create(ctx, req)
+		var resp *larkim.CreateMessageResp
+		var err error
+		if len(roots) > 0 && roots[0] != "" {
+			reply, replyErr := c.api.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().MessageId(roots[0]).Body(
+				larkim.NewReplyMessageReqBodyBuilder().Content(content).MsgType(kind).ReplyInThread(true).Uuid(uuid).Build()).Build())
+			err = replyErr
+			if reply != nil {
+				resp = &larkim.CreateMessageResp{ApiResp: reply.ApiResp, CodeError: reply.CodeError}
+				if reply.Data != nil {
+					resp.Data = &larkim.CreateMessageRespData{MessageId: reply.Data.MessageId}
+				}
+			}
+		} else {
+			resp, err = c.api.Im.Message.Create(ctx, req)
+		}
 		status, code := 0, 0
 		if resp != nil {
 			code = resp.Code

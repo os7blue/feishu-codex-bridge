@@ -42,17 +42,18 @@ type MessageRoute struct {
 }
 
 type Data struct {
-	ModelDefaults  ModelSettings            `json:"model_defaults,omitempty"`
-	ModelOverrides map[string]ModelSettings `json:"model_overrides,omitempty"`
-	Version        int                      `json:"version"`
-	AppID          string                   `json:"app_id"`
-	Project        string                   `json:"project"`
-	PairedID       string                   `json:"paired_open_id,omitempty"`
-	Bindings       map[string]Binding       `json:"bindings"`
-	Seen           map[string]int64         `json:"seen"`
-	Sessions       map[string]Session       `json:"sessions,omitempty"`
-	Routes         map[string]MessageRoute  `json:"message_routes,omitempty"`
-	NextRef        int                      `json:"next_ref,omitempty"`
+	ModelDefaults     ModelSettings            `json:"model_defaults,omitempty"`
+	ModelOverrides    map[string]ModelSettings `json:"model_overrides,omitempty"`
+	Version           int                      `json:"version"`
+	AppID             string                   `json:"app_id"`
+	Project           string                   `json:"project"`
+	PairedID          string                   `json:"paired_open_id,omitempty"`
+	Bindings          map[string]Binding       `json:"bindings"`
+	Seen              map[string]int64         `json:"seen"`
+	Sessions          map[string]Session       `json:"sessions,omitempty"`
+	Routes            map[string]MessageRoute  `json:"message_routes,omitempty"`
+	ConversationRoots map[string]MessageRoute  `json:"conversation_roots,omitempty"`
+	NextRef           int                      `json:"next_ref,omitempty"`
 }
 
 // ModelPreferences returns copies, never the mutable saved maps.
@@ -352,8 +353,64 @@ func (s *Store) RememberRoutes(ids []string, route MessageRoute) error {
 func (s *Store) Route(id, chat, owner string) (MessageRoute, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if route, ok := s.data.ConversationRoots[id]; ok {
+		return route, route.ChatID == chat && route.OwnerID == owner
+	}
 	route, ok := s.data.Routes[id]
+	if ok && route.ChatID == chat && route.OwnerID == owner {
+		for _, root := range s.data.ConversationRoots {
+			if root.ChatID == chat && root.OwnerID == owner && root.ThreadID == route.ThreadID {
+				return route, true
+			}
+		}
+	}
 	return route, ok && route.ChatID == chat && route.OwnerID == owner && route.Created >= time.Now().Add(-7*24*time.Hour).Unix()
+}
+
+func (s *Store) ConversationRoot(chat, owner, thread string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, route := range s.data.ConversationRoots {
+		if route.ChatID == chat && route.OwnerID == owner && route.ThreadID == thread {
+			return id, true
+		}
+	}
+	return "", false
+}
+
+func (s *Store) RememberConversationRoot(id string, route MessageRoute) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, ok := s.data.Sessions[route.ThreadID]
+	if id == "" || route.ChatID == "" || route.OwnerID == "" || !ok || session.OwnerID != route.OwnerID {
+		return errors.New("invalid conversation root scope")
+	}
+	for root, saved := range s.data.ConversationRoots {
+		if root == id || (saved.ChatID == route.ChatID && saved.OwnerID == route.OwnerID && saved.ThreadID == route.ThreadID) {
+			if root == id && saved.ChatID == route.ChatID && saved.OwnerID == route.OwnerID && saved.ThreadID == route.ThreadID {
+				return nil
+			}
+			return errors.New("conversation root already bound")
+		}
+	}
+	if saved, ok := s.data.Routes[id]; ok && (saved.ChatID != route.ChatID || saved.OwnerID != route.OwnerID || saved.ThreadID != route.ThreadID) {
+		return errors.New("conversation root conflicts with message route")
+	}
+	if len(s.data.ConversationRoots) >= 20000 {
+		return errors.New("conversation root capacity reached")
+	}
+	old := s.data.ConversationRoots
+	next := make(map[string]MessageRoute, len(old)+1)
+	for key, value := range old {
+		next[key] = value
+	}
+	next[id] = route
+	s.data.ConversationRoots = next
+	if err := s.save(); err != nil {
+		s.data.ConversationRoots = old
+		return err
+	}
+	return nil
 }
 
 func (s *Store) OwnerChat() (string, bool) {

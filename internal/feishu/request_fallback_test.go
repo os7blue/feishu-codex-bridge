@@ -88,6 +88,17 @@ func TestRealRequestFallbackThroughSDKAndManualReply(t *testing.T) {
 					body, _ := json.Marshal(map[string]any{"code": 0, "data": map[string]string{"message_id": frame["uuid"]}})
 					return slashResponse(req, 200, string(body)), nil
 				default:
+					if strings.HasPrefix(req.URL.Path, "/open-apis/im/v1/messages/") && strings.HasSuffix(req.URL.Path, "/reply") {
+						var frame struct {
+							InThread bool   `json:"reply_in_thread"`
+							UUID     string `json:"uuid"`
+						}
+						if err := json.NewDecoder(req.Body).Decode(&frame); err != nil || !frame.InThread {
+							return nil, errors.New("invalid synthetic topic reply")
+						}
+						body, _ := json.Marshal(map[string]any{"code": 0, "data": map[string]string{"message_id": "topic-" + frame.UUID}})
+						return slashResponse(req, 200, string(body)), nil
+					}
 					return nil, errors.New("unexpected SDK endpoint")
 				}
 			}}))

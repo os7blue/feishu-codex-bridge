@@ -17,6 +17,18 @@ type RoutedMessenger interface {
 type RichMessenger interface {
 	SendCardRouted(context.Context, string, json.RawMessage, string) ([]string, error)
 }
+
+// Conversation delivery groups frontend messages under an opaque native root.
+// It never changes the model session or grants access to another chat/user.
+type ConversationMessenger interface {
+	ConversationLink(string, string) string
+	SendConversationText(context.Context, string, string, string, string) ([]string, error)
+	SendTextWithConversation(context.Context, string, string, string, string) ([]string, error)
+	SendCardWithConversation(context.Context, string, string, json.RawMessage, string) ([]string, error)
+}
+type ConversationFileTransport interface {
+	SendConversationFile(context.Context, string, string, string, []byte, string) ([]string, error)
+}
 type FileTransport interface {
 	DownloadFile(context.Context, string, Attachment) ([]byte, error)
 	SendFile(context.Context, string, string, []byte, string) ([]string, error)
@@ -39,5 +51,7 @@ type Repository interface {
 	ClaimHandoff(string) (bool, error)
 	RememberRoutes([]string, state.MessageRoute) error
 	Route(string, string, string) (state.MessageRoute, bool)
+	ConversationRoot(string, string, string) (string, bool)
+	RememberConversationRoot(string, state.MessageRoute) error
 	OwnerChat() (string, bool)
 }

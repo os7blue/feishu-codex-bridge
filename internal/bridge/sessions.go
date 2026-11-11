@@ -185,15 +185,19 @@ func (b *Bridge) rememberInputRoute(input Input) bool {
 	if input.MessageID == "" || input.ThreadID == "" || !b.authorized(input.UserID) {
 		return true
 	}
+	created := time.Now().Unix()
+	if saved, ok := b.store.Route(input.MessageID, input.ChatID, input.UserID); ok && saved.ThreadID == input.ThreadID {
+		created = saved.Created
+	}
 	ids := []string{input.MessageID}
 	if input.SourceCardID != "" {
 		ids = append(ids, input.SourceCardID)
 	}
-	if err := b.store.RememberRoutes(ids, state.MessageRoute{ChatID: input.ChatID, OwnerID: input.UserID, ThreadID: input.ThreadID, Created: time.Now().Unix()}); err != nil {
+	if err := b.store.RememberRoutes(ids, state.MessageRoute{ChatID: input.ChatID, OwnerID: input.UserID, ThreadID: input.ThreadID, Created: created}); err != nil {
 		b.fail(errors.New("cannot persist incoming message routing"))
 		return false
 	}
-	return true
+	return b.rememberConversationInput(input, created)
 }
 
 func (b *Bridge) sessionsCommand(ctx context.Context, input Input, command, rest string) bool {

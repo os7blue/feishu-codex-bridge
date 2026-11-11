@@ -84,61 +84,66 @@ type pending struct {
 }
 
 type Bridge struct {
-	renderer      presentation.Renderer
-	models        *modelsettings.Service
-	cfg           config.Config
-	rpc           RPC
-	sender        Messenger
-	store         Repository
-	log           *slog.Logger
-	mu            sync.Mutex
-	active        *task
-	replyStatus   atomic.Pointer[replyStatus]
-	pending       map[string]pending
-	pairCode      string
-	pairUntil     time.Time
-	in            chan Input
-	out           chan outbound
-	fatal         chan error
-	failed        atomic.Bool
-	maintenanceMu sync.Mutex
-	operations    int
-	draining      bool
-	recoveryOnce  sync.Once
-	recoveryErr   error
-	jobs          sync.WaitGroup
-	queue         []queued
-	wake          chan struct{}
-	selection     map[string]uint64
-	pages         map[string]sessionPage
-	loaded        map[string]bool // Threads loaded in this App Server process only.
-	draftMu       sync.Mutex
-	inboxMu       sync.Mutex
-	fileMu        sync.Mutex
-	receivedFiles []receivedFile
-	drafts        map[string]commandDraft // Ephemeral UI grants, never session state.
-	closedDrafts  map[string]closedDraft
-	transfers     map[string]bool
-	diagnostics   diagnostics.Collector
+	conversationMu     sync.Mutex
+	conversationInputs map[string]time.Time
+	renderer           presentation.Renderer
+	models             *modelsettings.Service
+	cfg                config.Config
+	rpc                RPC
+	sender             Messenger
+	store              Repository
+	log                *slog.Logger
+	mu                 sync.Mutex
+	active             *task
+	replyStatus        atomic.Pointer[replyStatus]
+	pending            map[string]pending
+	pairCode           string
+	pairUntil          time.Time
+	in                 chan Input
+	out                chan outbound
+	fatal              chan error
+	failed             atomic.Bool
+	maintenanceMu      sync.Mutex
+	operations         int
+	draining           bool
+	recoveryOnce       sync.Once
+	recoveryErr        error
+	jobs               sync.WaitGroup
+	queue              []queued
+	wake               chan struct{}
+	selection          map[string]uint64
+	pages              map[string]sessionPage
+	loaded             map[string]bool // Threads loaded in this App Server process only.
+	draftMu            sync.Mutex
+	inboxMu            sync.Mutex
+	fileMu             sync.Mutex
+	receivedFiles      []receivedFile
+	drafts             map[string]commandDraft // Ephemeral UI grants, never session state.
+	closedDrafts       map[string]closedDraft
+	transfers          map[string]bool
+	diagnostics        diagnostics.Collector
 }
 
 func (b *Bridge) Diagnostics() *diagnostics.Collector { return &b.diagnostics }
 
 type outbound struct {
-	Chat         string          `json:"chat_id"`
-	Text         string          `json:"text"`
-	Key          string          `json:"delivery_id"`
-	Created      int64           `json:"created_at"`
-	ThreadID     string          `json:"thread_id,omitempty"`
-	OwnerID      string          `json:"owner_id,omitempty"`
-	Format       string          `json:"format,omitempty"`
-	Card         json.RawMessage `json:"card,omitempty"`
-	Interaction  string          `json:"interaction,omitempty"` // Fixed purpose enum, never a request ID.
-	TextFallback bool            `json:"text_fallback,omitempty"`
-	RequestToken string          `json:"request_token,omitempty"` // Private outbox only; never diagnostics.
-	FilePath     string          `json:"file_path,omitempty"`
-	FileName     string          `json:"file_name,omitempty"`
-	FileDigest   string          `json:"file_digest,omitempty"`
+	Chat             string          `json:"chat_id"`
+	Text             string          `json:"text"`
+	Key              string          `json:"delivery_id"`
+	Created          int64           `json:"created_at"`
+	ThreadID         string          `json:"thread_id,omitempty"`
+	OwnerID          string          `json:"owner_id,omitempty"`
+	Format           string          `json:"format,omitempty"`
+	Card             json.RawMessage `json:"card,omitempty"`
+	Interaction      string          `json:"interaction,omitempty"` // Fixed purpose enum, never a request ID.
+	TextFallback     bool            `json:"text_fallback,omitempty"`
+	RequestToken     string          `json:"request_token,omitempty"` // Private outbox only; never diagnostics.
+	FilePath         string          `json:"file_path,omitempty"`
+	FileName         string          `json:"file_name,omitempty"`
+	FileDigest       string          `json:"file_digest,omitempty"`
+	ConversationRoot string          `json:"conversation_root,omitempty"`
+	DeliveredIDs     []string        `json:"delivered_ids,omitempty"`
+	Transcript       bool            `json:"conversation_transcript,omitempty"`
 }
 
 func New(c config.Config, rpc RPC, sender Messenger, store Repository, log *slog.Logger, renderer presentation.Renderer) *Bridge {
@@ -494,11 +499,24 @@ func (b *Bridge) deliverOne(ctx context.Context, item outbound) bool {
 	}
 	callCtx, cancel := context.WithDeadline(ctx, callDeadline)
 	var err error
+	item.ConversationRoot, err = b.conversationRoot(callCtx, item)
+	if err != nil {
+		cancel()
+		record("failed")
+		return false
+	}
 	var ids []string
-	if item.FilePath != "" {
+	if item.Transcript {
+		// Main-chat user input already exists; only its attributed topic copy is sent.
+		ids = []string{}
+	} else if len(item.DeliveredIDs) > 0 {
+		ids = item.DeliveredIDs
+	} else if item.FilePath != "" {
 		ids, err = b.sendFile(callCtx, item)
 	} else if len(item.Card) != 0 && !item.TextFallback {
-		if sender, ok := b.sender.(RichMessenger); ok {
+		if sender, ok := b.sender.(ConversationMessenger); ok && item.ConversationRoot != "" {
+			ids, err = sender.SendCardWithConversation(callCtx, item.Chat, item.ConversationRoot, item.Card, item.Key)
+		} else if sender, ok := b.sender.(RichMessenger); ok {
 			ids, err = sender.SendCardRouted(callCtx, item.Chat, item.Card, item.Key)
 		} else {
 			stage = "text_delivery" // Text fallback is not evidence of a delivered card.
@@ -531,6 +549,21 @@ func (b *Bridge) deliverOne(ctx context.Context, item outbound) bool {
 			b.diagnostics.Record("request_text_fallback", "started")
 		}
 		ids, err = b.sendText(callCtx, item)
+	}
+	if err == nil && item.ConversationRoot != "" {
+		item.DeliveredIDs = ids
+		if state.WritePrivate(path, item) != nil {
+			b.fail(errors.New("cannot persist main delivery receipt"))
+			cancel()
+			return false
+		}
+		var copies []string
+		if item.FilePath != "" {
+			copies, err = b.sendConversationFile(callCtx, item)
+		} else {
+			copies, err = b.sender.(ConversationMessenger).SendConversationText(callCtx, item.Chat, item.ConversationRoot, item.Text, item.Key+":conversation")
+		}
+		ids = append(append([]string(nil), ids...), copies...)
 	}
 	if len(ids) > 0 && item.ThreadID != "" && item.OwnerID != "" {
 		if routeErr := b.store.RememberRoutes(ids, state.MessageRoute{ChatID: item.Chat, OwnerID: item.OwnerID, ThreadID: item.ThreadID, Created: time.Now().Unix()}); routeErr != nil {
@@ -587,6 +620,9 @@ func (b *Bridge) sendText(ctx context.Context, item outbound) ([]string, error) 
 		}
 		text = prefix + "\n\n" + text
 		key += ":text-fallback"
+	}
+	if sender, ok := b.sender.(ConversationMessenger); ok && item.ConversationRoot != "" {
+		return sender.SendTextWithConversation(ctx, item.Chat, item.ConversationRoot, text, key)
 	}
 	if sender, ok := b.sender.(RoutedMessenger); ok {
 		return sender.SendRouted(ctx, item.Chat, text, key)

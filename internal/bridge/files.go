@@ -208,7 +208,7 @@ func (b *Bridge) queueFile(input Input, name string, data []byte, reissue ...boo
 	}
 }
 
-func (b *Bridge) sendFile(ctx context.Context, item outbound) ([]string, error) {
+func (b *Bridge) fileSnapshot(item outbound) ([]byte, error) {
 	if item.FilePath != filepath.Join(b.cfg.StateDir, "attachment-out-"+item.Key+".bin") || safeFileName(item.FileName) != item.FileName {
 		return nil, errors.New("invalid outgoing file receipt")
 	}
@@ -224,6 +224,15 @@ func (b *Bridge) sendFile(ctx context.Context, item outbound) ([]string, error) 
 	if hex.EncodeToString(digest[:]) != item.FileDigest {
 		return nil, errors.New("file snapshot changed")
 	}
+	return data, nil
+}
+
+func (b *Bridge) sendFile(ctx context.Context, item outbound) ([]string, error) {
+	data, err := b.fileSnapshot(item)
+	if err != nil {
+		return nil, err
+	}
+
 	sender, ok := b.sender.(fileTransport)
 	if !ok {
 		return nil, errors.New("file transport unavailable")

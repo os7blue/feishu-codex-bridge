@@ -57,6 +57,14 @@ func (c *Client) DownloadFile(ctx context.Context, message string, a bridge.Atta
 }
 
 func (c *Client) SendFile(ctx context.Context, chat, name string, data []byte, key string) ([]string, error) {
+	return c.sendFileContent(ctx, chat, name, data, key, "")
+}
+
+func (c *Client) SendConversationFile(ctx context.Context, chat, root, name string, data []byte, key string) ([]string, error) {
+	return c.sendFileContent(ctx, chat, name, data, key, root)
+}
+
+func (c *Client) sendFileContent(ctx context.Context, chat, name string, data []byte, key, root string) ([]string, error) {
 	if len(data) == 0 || len(data) > bridge.MaxFileBytes {
 		return nil, errors.New("file empty or too large")
 	}
@@ -73,7 +81,7 @@ func (c *Client) SendFile(ctx context.Context, chat, name string, data []byte, k
 		return nil, fileFailure("upload", err, code, status)
 	}
 	body, _ := json.Marshal(map[string]string{"file_key": value(resp.Data.FileKey)})
-	id, err := c.sendContent(ctx, chat, "file", string(body), key)
+	id, err := c.sendContent(ctx, chat, "file", string(body), key, root)
 	if err != nil {
 		return nil, err
 	}
