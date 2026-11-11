@@ -127,23 +127,25 @@ type Bridge struct {
 func (b *Bridge) Diagnostics() *diagnostics.Collector { return &b.diagnostics }
 
 type outbound struct {
-	Chat             string          `json:"chat_id"`
-	Text             string          `json:"text"`
-	Key              string          `json:"delivery_id"`
-	Created          int64           `json:"created_at"`
-	ThreadID         string          `json:"thread_id,omitempty"`
-	OwnerID          string          `json:"owner_id,omitempty"`
-	Format           string          `json:"format,omitempty"`
-	Card             json.RawMessage `json:"card,omitempty"`
-	Interaction      string          `json:"interaction,omitempty"` // Fixed purpose enum, never a request ID.
-	TextFallback     bool            `json:"text_fallback,omitempty"`
-	RequestToken     string          `json:"request_token,omitempty"` // Private outbox only; never diagnostics.
-	FilePath         string          `json:"file_path,omitempty"`
-	FileName         string          `json:"file_name,omitempty"`
-	FileDigest       string          `json:"file_digest,omitempty"`
-	ConversationRoot string          `json:"conversation_root,omitempty"`
-	DeliveredIDs     []string        `json:"delivered_ids,omitempty"`
-	Transcript       bool            `json:"conversation_transcript,omitempty"`
+	Chat                 string          `json:"chat_id"`
+	Text                 string          `json:"text"`
+	Key                  string          `json:"delivery_id"`
+	Created              int64           `json:"created_at"`
+	ThreadID             string          `json:"thread_id,omitempty"`
+	OwnerID              string          `json:"owner_id,omitempty"`
+	Format               string          `json:"format,omitempty"`
+	Card                 json.RawMessage `json:"card,omitempty"`
+	Interaction          string          `json:"interaction,omitempty"` // Fixed purpose enum, never a request ID.
+	TextFallback         bool            `json:"text_fallback,omitempty"`
+	RequestToken         string          `json:"request_token,omitempty"` // Private outbox only; never diagnostics.
+	FilePath             string          `json:"file_path,omitempty"`
+	FileName             string          `json:"file_name,omitempty"`
+	FileDigest           string          `json:"file_digest,omitempty"`
+	ConversationRoot     string          `json:"conversation_root,omitempty"`
+	DeliveredIDs         []string        `json:"delivered_ids,omitempty"`
+	ConversationIDs      []string        `json:"conversation_ids,omitempty"`
+	ConversationEntryIDs []string        `json:"conversation_entry_ids,omitempty"`
+	Transcript           bool            `json:"conversation_transcript,omitempty"`
 }
 
 func New(c config.Config, rpc RPC, sender Messenger, store Repository, log *slog.Logger, renderer presentation.Renderer) *Bridge {
@@ -514,9 +516,7 @@ func (b *Bridge) deliverOne(ctx context.Context, item outbound) bool {
 	} else if item.FilePath != "" {
 		ids, err = b.sendFile(callCtx, item)
 	} else if len(item.Card) != 0 && !item.TextFallback {
-		if sender, ok := b.sender.(ConversationMessenger); ok && item.ConversationRoot != "" {
-			ids, err = sender.SendCardWithConversation(callCtx, item.Chat, item.ConversationRoot, item.Card, item.Key)
-		} else if sender, ok := b.sender.(RichMessenger); ok {
+		if sender, ok := b.sender.(RichMessenger); ok {
 			ids, err = sender.SendCardRouted(callCtx, item.Chat, item.Card, item.Key)
 		} else {
 			stage = "text_delivery" // Text fallback is not evidence of a delivered card.
@@ -557,13 +557,40 @@ func (b *Bridge) deliverOne(ctx context.Context, item outbound) bool {
 			cancel()
 			return false
 		}
-		var copies []string
-		if item.FilePath != "" {
-			copies, err = b.sendConversationFile(callCtx, item)
-		} else {
-			copies, err = b.sender.(ConversationMessenger).SendConversationText(callCtx, item.Chat, item.ConversationRoot, item.Text, item.Key+":conversation")
+		copies := item.ConversationIDs
+		if len(copies) == 0 {
+			if item.FilePath != "" {
+				copies, err = b.sendConversationFile(callCtx, item)
+			} else {
+				copies, err = b.sender.(ConversationMessenger).SendConversationText(callCtx, item.Chat, item.ConversationRoot, item.Text, item.Key+":conversation")
+			}
+			if err == nil {
+				item.ConversationIDs = copies
+				if state.WritePrivate(path, item) != nil {
+					b.fail(errors.New("cannot persist conversation delivery receipt"))
+					cancel()
+					return false
+				}
+			}
 		}
 		ids = append(append([]string(nil), ids...), copies...)
+		// Forward the native topic only after the current reply is inside it.
+		// User transcript copies do not create an extra main-chat notification.
+		if err == nil && !item.Transcript {
+			entries := item.ConversationEntryIDs
+			if len(entries) == 0 {
+				entries, err = b.sender.(ConversationMessenger).SendConversationEntry(callCtx, item.Chat, item.ConversationRoot, item.Key+":conversation-entry")
+				if err == nil {
+					item.ConversationEntryIDs = entries
+					if state.WritePrivate(path, item) != nil {
+						b.fail(errors.New("cannot persist conversation entry receipt"))
+						cancel()
+						return false
+					}
+				}
+			}
+			ids = append(ids, entries...)
+		}
 	}
 	if len(ids) > 0 && item.ThreadID != "" && item.OwnerID != "" {
 		if routeErr := b.store.RememberRoutes(ids, state.MessageRoute{ChatID: item.Chat, OwnerID: item.OwnerID, ThreadID: item.ThreadID, Created: time.Now().Unix()}); routeErr != nil {
@@ -620,9 +647,6 @@ func (b *Bridge) sendText(ctx context.Context, item outbound) ([]string, error) 
 		}
 		text = prefix + "\n\n" + text
 		key += ":text-fallback"
-	}
-	if sender, ok := b.sender.(ConversationMessenger); ok && item.ConversationRoot != "" {
-		return sender.SendTextWithConversation(ctx, item.Chat, item.ConversationRoot, text, key)
 	}
 	if sender, ok := b.sender.(RoutedMessenger); ok {
 		return sender.SendRouted(ctx, item.Chat, text, key)

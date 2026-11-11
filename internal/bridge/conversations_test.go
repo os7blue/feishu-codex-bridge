@@ -12,35 +12,44 @@ import (
 )
 
 type conversationSender struct {
-	roots, mains, copies int
-	failCopy             bool
-	targets              []string
-	texts                []string
+	roots, mains, copies, entries int
+	failCopy                      bool
+	failEntry                     bool
+	order                         []string
+	targets                       []string
+	texts                         []string
 }
 
 func (s *conversationSender) Send(context.Context, string, string, string) error {
 	return errors.New("unexpected legacy delivery")
 }
 func (s *conversationSender) SendRouted(_ context.Context, chat, text, key string) ([]string, error) {
-	s.roots++
-	return []string{fmt.Sprintf("root-%d", s.roots)}, nil
-}
-func (*conversationSender) ConversationLink(chat, root string) string {
-	return "fixture://" + chat + "/" + root
-}
-func (s *conversationSender) SendTextWithConversation(_ context.Context, chat, root, text, key string) ([]string, error) {
+	if strings.HasPrefix(key, "conversation-root:") {
+		s.order = append(s.order, "root")
+		s.roots++
+		return []string{fmt.Sprintf("root-%d", s.roots)}, nil
+	}
 	s.mains++
-	s.targets = append(s.targets, root)
+	s.order = append(s.order, "main")
 	s.texts = append(s.texts, text)
 	return []string{fmt.Sprintf("main-%d", s.mains)}, nil
 }
-func (s *conversationSender) SendCardWithConversation(_ context.Context, chat, root string, card json.RawMessage, key string) ([]string, error) {
+func (s *conversationSender) SendCardRouted(_ context.Context, chat string, card json.RawMessage, key string) ([]string, error) {
 	s.mains++
-	s.targets = append(s.targets, root)
 	return []string{fmt.Sprintf("card-%d", s.mains)}, nil
+}
+func (s *conversationSender) SendConversationEntry(_ context.Context, chat, root, key string) ([]string, error) {
+	s.order = append(s.order, "entry")
+	s.entries++
+	s.targets = append(s.targets, root)
+	if s.failEntry {
+		return nil, errors.New("synthetic native card offline")
+	}
+	return []string{fmt.Sprintf("entry-%d", s.entries)}, nil
 }
 func (s *conversationSender) SendConversationText(_ context.Context, chat, root, text, key string) ([]string, error) {
 	s.copies++
+	s.order = append(s.order, "copy")
 	s.targets = append(s.targets, root)
 	if s.failCopy {
 		return nil, errors.New("synthetic topic offline")
@@ -61,9 +70,15 @@ func TestConversationRetainsMainReplyAndRetryDoesNotRepeatIt(t *testing.T) {
 	if got := readFixtureOutbox(t, b, item); len(got.DeliveredIDs) != 1 {
 		t.Fatal("main receipt not saved before topic retry")
 	}
+	if strings.Join(s.order, ",") != "root,main,copy" {
+		t.Fatal("entry preceded topic copy or main body was not delivered first")
+	}
 	s.failCopy = false
-	if !b.deliverOne(context.Background(), item) || s.roots != 1 || s.mains != 1 || s.copies != 2 {
+	if !b.deliverOne(context.Background(), item) || s.roots != 1 || s.mains != 1 || s.copies != 2 || s.entries != 1 {
 		t.Fatal("retry repeated main reply or replaced root")
+	}
+	if strings.Join(s.order, ",") != "root,main,copy,copy,entry" {
+		t.Fatal("retry changed body-copy-entry order")
 	}
 	if s.texts[0] == "" || !strings.Contains(s.texts[0], "complete current answer") {
 		t.Fatal("main reply became a summary")
@@ -89,6 +104,32 @@ func TestConversationRetainsMainReplyAndRetryDoesNotRepeatIt(t *testing.T) {
 	}
 }
 
+func TestNativeConversationEntryFailureRecoversWithoutRepeatingBodyOrTopicCopy(t *testing.T) {
+	b, _ := setup(t)
+	s := &conversationSender{failEntry: true}
+	b.sender = s
+	b.store.RememberSession(state.Session{ThreadID: "thread-a", OwnerID: "ou_owner", Cwd: b.cfg.ProjectDir})
+	b.emit("chat-1", "complete current answer", "thread-a")
+	item := <-b.out
+	if b.deliverOne(context.Background(), item) || s.mains != 1 || s.copies != 1 || s.entries != 1 {
+		t.Fatal("native entry failure was not retained")
+	}
+	saved := readFixtureOutbox(t, b, item)
+	if len(saved.DeliveredIDs) != 1 || len(saved.ConversationIDs) != 1 || len(saved.ConversationEntryIDs) != 0 {
+		t.Fatal("independent delivery receipts missing")
+	}
+	// A fresh transport stands in for a restart: authoritative disk receipts,
+	// rather than its process-local memory, prevent both earlier sends.
+	next := &conversationSender{}
+	b.sender = next
+	if !b.deliverOne(context.Background(), item) || next.roots != 0 || next.mains != 0 || next.copies != 0 || next.entries != 1 {
+		t.Fatal("recovery repeated an already delivered body or topic copy")
+	}
+	if _, ok := b.store.Route("entry-1", "chat-1", "ou_owner"); !ok {
+		t.Fatal("native entry was not bound to the exact session")
+	}
+}
+
 func TestConversationCopiesMainInputsOnceWithoutStartingModel(t *testing.T) {
 	b, rpc := setup(t)
 	s := &conversationSender{}
@@ -107,7 +148,7 @@ func TestConversationCopiesMainInputsOnceWithoutStartingModel(t *testing.T) {
 	if strings.Contains(item.Text, credential) || !strings.Contains(item.Text, "凭据已隐藏") {
 		t.Fatal("credential copied into topic transcript")
 	}
-	if !item.Transcript || !b.deliverOne(context.Background(), item) || s.mains != 0 || s.copies != 1 {
+	if !item.Transcript || !b.deliverOne(context.Background(), item) || s.mains != 0 || s.copies != 1 || s.entries != 0 {
 		t.Fatal("input was echoed in main chat")
 	}
 	root, _ := b.store.ConversationRoot(in.ChatID, in.UserID, in.ThreadID)

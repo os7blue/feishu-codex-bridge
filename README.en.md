@@ -12,7 +12,7 @@ The bridge connects the official Feishu SDK over a persistent connection to a lo
 
 ## Features
 
-- **Session topics:** keep each complete reply visible in the main chat, with a link to the session topic containing its conversation and results.
+- **Session topics:** keep each complete reply visible in the main chat, followed by a native Feishu topic record card containing its conversation and results.
 - **Multiple projects and sessions:** route messages through a default session, a quoted reply, or an explicit session reference.
 - **Task controls:** inspect queued requests and submission times, cancel one waiting task, or request interruption of the active task.
 - **Independent model settings:** configure bridge defaults or a complete session override; distinguish the current turn from the next.
@@ -121,11 +121,11 @@ Replace example references, paths, and placeholders with actual values.
 
 ### Session topics and history
 
-Each user, chat, and Codex session has a separate Feishu topic. Complete current replies remain visible in the main chat; text and cards link to the session topic. The topic collects user inputs, replies, progress, approval details, and results. Restarting or switching the default session preserves the binding. Reply within a topic to continue its session.
+Each user, chat, and Codex session has a separate Feishu topic. Complete current replies remain visible in the main chat, followed by a separate native forwarded-topic card that opens its records. No handcrafted deep link is appended to the reply. The topic collects user inputs, replies, progress, approval details, and results. Restarting or switching the default session preserves the binding. Reply within a topic to continue its session.
 
-Inputs sent from the main chat are copied with clear attribution and never submitted to the model again. Inputs already inside the topic are not copied. Approvals still require the original user to submit them manually before expiry. Failed topic copies retain the outbox item and reuse the saved main-message receipt on retry.
+Inputs sent from the main chat are copied with clear attribution and never submitted to the model again. Inputs already inside the topic are not copied. Approvals still require the original user to submit them manually before expiry. The main reply, topic copy, and native record card have separate durable delivery receipts. The current reply is added to the topic before forwarding it; retries do not resend completed steps.
 
-Previously scattered messages are not automatically migrated into native replies; `/history #3` shows existing model history. Topic deep links and desktop/mobile presentation require real client acceptance. Other frontend adapters retain their existing delivery behavior.
+Previously scattered messages are not automatically migrated into native replies; `/history #3` shows existing model history. Native card expansion and desktop/mobile presentation require real client acceptance. Older forwarded cards are not guaranteed to refresh with later replies. Other frontend adapters retain their existing delivery behavior.
 
 ### Models and reasoning effort
 

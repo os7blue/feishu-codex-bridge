@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -26,10 +27,12 @@ import (
 )
 
 type Client struct {
-	api           *lark.Client
-	appID, secret string
-	log           *slog.Logger
-	diagnostics   *diagnostics.Collector
+	api                 *lark.Client
+	appID, secret       string
+	log                 *slog.Logger
+	diagnostics         *diagnostics.Collector
+	conversationMu      sync.Mutex
+	conversationThreads map[string]string
 }
 
 // DeliveryError contains only fixed categories and numeric API diagnostics.
@@ -288,6 +291,28 @@ func (c *Client) sendContent(ctx context.Context, chat, kind, content, key strin
 	req := larkim.NewCreateMessageReqBuilder().ReceiveIdType("chat_id").Body(
 		larkim.NewCreateMessageReqBodyBuilder().ReceiveId(chat).MsgType(kind).Content(content).Uuid(uuid).Build(),
 	).Build()
+	return c.sendMessage(ctx, kind, func() (*larkim.CreateMessageResp, error) {
+		if len(roots) == 0 || roots[0] == "" {
+			return c.api.Im.Message.Create(ctx, req)
+		}
+		reply, err := c.api.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().MessageId(roots[0]).Body(
+			larkim.NewReplyMessageReqBodyBuilder().Content(content).MsgType(kind).ReplyInThread(true).Uuid(uuid).Build()).Build())
+		if reply == nil {
+			return nil, err
+		}
+		resp := &larkim.CreateMessageResp{ApiResp: reply.ApiResp, CodeError: reply.CodeError}
+		if reply.Data != nil {
+			resp.Data = &larkim.CreateMessageRespData{MessageId: reply.Data.MessageId}
+			if err == nil && reply.Success() {
+				c.rememberConversationThread(chat, roots[0], reply.Data.ChatId, reply.Data.ThreadId)
+			}
+		}
+		return resp, err
+	})
+}
+
+// Shared bounded retries and numeric-only diagnostics for create/reply/forward.
+func (c *Client) sendMessage(ctx context.Context, kind string, send func() (*larkim.CreateMessageResp, error)) (string, error) {
 	var sendErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
@@ -300,21 +325,7 @@ func (c *Client) sendContent(ctx context.Context, chat, kind, content, key strin
 			case <-timer.C:
 			}
 		}
-		var resp *larkim.CreateMessageResp
-		var err error
-		if len(roots) > 0 && roots[0] != "" {
-			reply, replyErr := c.api.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().MessageId(roots[0]).Body(
-				larkim.NewReplyMessageReqBodyBuilder().Content(content).MsgType(kind).ReplyInThread(true).Uuid(uuid).Build()).Build())
-			err = replyErr
-			if reply != nil {
-				resp = &larkim.CreateMessageResp{ApiResp: reply.ApiResp, CodeError: reply.CodeError}
-				if reply.Data != nil {
-					resp.Data = &larkim.CreateMessageRespData{MessageId: reply.Data.MessageId}
-				}
-			}
-		} else {
-			resp, err = c.api.Im.Message.Create(ctx, req)
-		}
+		resp, err := send()
 		status, code := 0, 0
 		if resp != nil {
 			code = resp.Code
