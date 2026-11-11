@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, symlink, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { installPublicRelease, verifyRelease, writeManifest } from './feishu-release.mjs';
@@ -45,6 +45,58 @@ test('partial public update can roll back even before the manifest changes', asy
   await applyPublicUpdate(f.staging,f.backup,f.target,expected,{rollback:true});
   assert.equal((await verifyRelease(f.target)).size,7);
   assert.equal(await readFile(join(f.target,'feishu-bridge'),'utf8'),'old public feishu-bridge');
+});
+
+async function addPublicFile(directory, name) {
+  const files = [...(await verifyRelease(directory)).keys(), name];
+  await mkdir(join(directory, name, '..'), {recursive:true});
+  await writeFile(join(directory, name), 'old manifest-owned development record');
+  await unlink(join(directory,'MANIFEST.sha256'));
+  await writeManifest(directory, files);
+}
+
+test('retired manifest-owned development records are removed and restored by rollback', async()=>{
+  const f=await fixture();
+  await addPublicFile(f.target,'docs/HANDOFF.md');
+  await addPublicFile(f.target,'AGENTS.md');
+  await writeFile(join(f.target,'docs/PLAN.md'),'unknown local record');
+  const expected=await preparePublicUpdate(f.next,f.target,f.backup,f.staging);
+  await applyPublicUpdate(f.staging,f.backup,f.target,expected);
+  for(const name of ['docs/HANDOFF.md','AGENTS.md']) {
+    await assert.rejects(readFile(join(f.target,name)),{code:'ENOENT'});
+  }
+  assert.equal(await readFile(join(f.target,'docs/PLAN.md'),'utf8'),'unknown local record');
+  assert.equal((await verifyRelease(f.target)).size,8);
+  await applyPublicUpdate(f.staging,f.backup,f.target,expected,{rollback:true});
+  assert.equal((await verifyRelease(f.target)).size,9);
+  assert.equal(await readFile(join(f.target,'docs/HANDOFF.md'),'utf8'),'old manifest-owned development record');
+  assert.equal(await readFile(join(f.target,'AGENTS.md'),'utf8'),'old manifest-owned development record');
+  assert.equal(await readFile(join(f.target,'config.json'),'utf8'),'private fixture must survive');
+});
+
+test('failure after retirement restores missing public records before manifest publication', async()=>{
+  const f=await fixture();
+  await addPublicFile(f.target,'docs/HANDOFF.md');
+  const expected=await preparePublicUpdate(f.next,f.target,f.backup,f.staging);
+  await assert.rejects(applyPublicUpdate(f.staging,f.backup,f.target,expected,{
+    afterFile:async name=>{if(name==='docs/HANDOFF.md') throw new Error('retirement IO failure');},
+  }),/retirement IO failure/);
+  await applyPublicUpdate(f.staging,f.backup,f.target,expected,{rollback:true});
+  assert.equal((await verifyRelease(f.target)).size,8);
+  assert.equal(await readFile(join(f.target,'docs/HANDOFF.md'),'utf8'),'old manifest-owned development record');
+});
+
+test('unreviewed removals and changed retired records fail before public replacement', async()=>{
+  const f=await fixture();
+  await addPublicFile(f.target,'internal/keep.go');
+  await assert.rejects(preparePublicUpdate(f.next,f.target,f.backup,f.staging),{code:'public_manifest_removal_rejected'});
+  assert.equal(await readFile(join(f.target,'feishu-bridge'),'utf8'),'old public feishu-bridge');
+  const g=await fixture();
+  await addPublicFile(g.target,'docs/HANDOFF.md');
+  const expected=await preparePublicUpdate(g.next,g.target,g.backup,g.staging);
+  await writeFile(join(g.target,'docs/HANDOFF.md'),'changed after preparation');
+  await assert.rejects(applyPublicUpdate(g.staging,g.backup,g.target,expected),/checksum mismatch|changed/);
+  assert.equal(await readFile(join(g.target,'feishu-bridge'),'utf8'),'old public feishu-bridge');
 });
 
 test('new public paths cannot overwrite unknown colliding files or follow symlinks',async()=>{

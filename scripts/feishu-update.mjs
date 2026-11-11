@@ -8,6 +8,25 @@ import { installPublicRelease, verifyRelease, sha256 } from './feishu-release.mj
 
 const manifestHash = async directory => sha256(await readFile(join(directory, 'MANIFEST.sha256')));
 
+// Older packages included development records. Retire only these exact,
+// manifest-owned paths; unknown files and other removals remain forbidden.
+const retiredDevelopmentRecords = new Set([
+  'AGENTS.md', 'docs/HANDOFF.md', 'docs/PLAN.md',
+  'docs/PRODUCT_CHANGES.md', 'docs/PRODUCT_REVIEW.md',
+  'docs/REMAINING.md', 'docs/VALIDATION.md',
+  'docs/history/product-cleanup-baseline-2026-11-11.md',
+]);
+
+function removedPublicFiles(old, next) {
+  const removed = [...old.keys()].filter(name => !next.has(name));
+  if (removed.some(name => !retiredDevelopmentRecords.has(name))) {
+    const error = new Error('unreviewed public manifest removal');
+    error.code = 'public_manifest_removal_rejected';
+    throw error;
+  }
+  return removed;
+}
+
 async function safeParents(path) {
   const absolute = resolve(dirname(path));
   let parent = parse(absolute).root;
@@ -47,8 +66,8 @@ async function destination(root, name, known, alternate, partial) {
 export async function preparePublicUpdate(source, target, backup, staging) {
   const next = await verifyRelease(source);
   const old = await verifyRelease(target);
-  for (const name of old.keys()) if (!next.has(name)) throw new Error('this updater requires an additive public manifest');
-  for (const name of next.keys()) await destination(target, name, old, next, false);
+  removedPublicFiles(old, next);
+  for (const name of new Set([...old.keys(), ...next.keys()])) await destination(target, name, old, next, false);
   const oldHash = await manifestHash(target);
   await safeParents(backup);
   await safeParents(staging);
@@ -76,14 +95,14 @@ export async function applyPublicUpdate(staging, backup, target, expected, { rol
   const next = await verifyRelease(staging);
   const old = await verifyRelease(backup);
   if (await manifestHash(backup) !== expected.old_manifest_sha256 || await manifestHash(staging) !== expected.new_manifest_sha256) throw new Error('update snapshots changed');
-  for (const name of old.keys()) if (!next.has(name)) throw new Error('non-additive public manifest');
+  const removed = removedPublicFiles(old, next);
   const manifestEntry=await lstat(join(target,'MANIFEST.sha256'));
   if(!manifestEntry.isFile()||manifestEntry.isSymbolicLink()) throw new Error('installed manifest symlink rejected');
   if (!rollback) {
     await verifyRelease(target);
     if(await manifestHash(target) !== expected.old_manifest_sha256) throw new Error('installed manifest changed');
   }
-  for (const name of next.keys()) await destination(target, name, old, next, rollback);
+  for (const name of new Set([...old.keys(), ...next.keys()])) await destination(target, name, old, next, rollback);
   const from = rollback ? backup : staging;
   const files = rollback ? old : next;
   for (const name of files.keys()) {
@@ -94,6 +113,13 @@ export async function applyPublicUpdate(staging, backup, target, expected, { rol
     for (const name of next.keys()) {
       if (old.has(name)) continue;
       try { await unlink(join(target, name)); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+  } else {
+    for (const name of removed) {
+      // This file was verified against the old immutable public snapshot.
+      // The backup restores it if removal or a later installation step fails.
+      await unlink(join(target, name));
+      if (afterFile) await afterFile(name);
     }
   }
   // Publish the manifest last. Partial writes are recoverable from two verified
